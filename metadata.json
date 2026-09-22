@@ -1,0 +1,6 @@
+{
+  "name": "Spends & Expense Calculator",
+  "description": "Multi-category spends and expense calculator connected directly to Google Sheets for storage, featuring separate category tables, weekly spending trends, and real-time synchronization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
