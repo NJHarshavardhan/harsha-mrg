@@ -25,6 +25,14 @@ export function saveLocalExpenseState(state: ExpenseDataState): void {
   }
 }
 
+export function clearLocalExpenseState(): void {
+  try {
+    localStorage.removeItem(LOCAL_STORAGE_KEY);
+  } catch (e) {
+    console.warn('Failed to clear local storage:', e);
+  }
+}
+
 /**
  * Creates an empty initial state with zero hardcoded values.
  */

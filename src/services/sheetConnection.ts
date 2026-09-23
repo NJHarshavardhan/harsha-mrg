@@ -392,21 +392,23 @@ export function generateTestCurlCommand(url: string, method: 'GET' | 'POST'): st
  * 1-click Google Apps Script code to paste in Extensions > Apps Script of "harsha-marriage" sheet
  */
 export const APPS_SCRIPT_SOURCE = `// ============================================================
-// Google Apps Script for harsha-marriage (Zero OAuth Required)
+// Google Apps Script for harsha-marriage (Store & Fetch)
 // Paste in Extensions > Apps Script in your Google Sheet, then:
 // Click Deploy > New deployment > Web app > Execute as: Me > Who has access: Anyone
 // ============================================================
 
 function doGet(e) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName("ExpenseData") || ss.getSheets()[0];
-  var val = sheet.getRange("A1").getValue();
+  var sheet = ss.getSheetByName("ExpenseData");
   
   var data = { categories: [], expenses: {}, currency: "₹" };
-  if (val && typeof val === "string" && val.indexOf("{") !== -1) {
-    try {
-      data = JSON.parse(val);
-    } catch(err) {}
+  if (sheet) {
+    var val = sheet.getRange("A1").getValue();
+    if (val && typeof val === "string" && val.indexOf("{") !== -1) {
+      try {
+        data = JSON.parse(val);
+      } catch(err) {}
+    }
   }
   
   return ContentService.createTextOutput(JSON.stringify(data))
@@ -414,16 +416,76 @@ function doGet(e) {
 }
 
 function doPost(e) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName("ExpenseData");
-  if (!sheet) {
-    sheet = ss.insertSheet("ExpenseData");
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName("ExpenseData");
+    if (!sheet) {
+      sheet = ss.insertSheet("ExpenseData");
+    }
+    
+    var rawData = e.postData.contents;
+    sheet.getRange("A1").setValue(rawData);
+    
+    // Parse data to render clean human-readable tables in the Google Sheet
+    var data = JSON.parse(rawData);
+    var categories = data.categories || [];
+    var expenses = data.expenses || {};
+    var currency = data.currency || "₹";
+
+    // Update or create Category tabs for visual inspection in Google Sheets
+    for (var i = 0; i < categories.length; i++) {
+      var cat = categories[i];
+      var tabName = "Cat " + cat.categoryNumber + " - " + cat.name.substring(0, 20);
+      var catSheet = ss.getSheetByName(tabName);
+      if (!catSheet) {
+        catSheet = ss.insertSheet(tabName);
+      }
+      catSheet.clear();
+      
+      // Header row
+      var headers = [["S.No", "Expense Name", "Date", "Spent Amount (" + currency + ")", "Payment Method", "Notes"]];
+      catSheet.getRange(1, 1, 1, 6).setValues(headers)
+        .setFontWeight("bold")
+        .setBackground("#0f766e")
+        .setFontColor("#ffffff");
+      
+      var items = expenses[cat.id] || [];
+      var rows = [];
+      var subtotal = 0;
+      for (var j = 0; j < items.length; j++) {
+        var it = items[j];
+        subtotal += Number(it.spentAmt) || 0;
+        rows.push([
+          j + 1,
+          it.name || "",
+          it.date || "",
+          Number(it.spentAmt) || 0,
+          it.paymentMethod || "",
+          it.notes || ""
+        ]);
+      }
+      
+      if (rows.length > 0) {
+        catSheet.getRange(2, 1, rows.length, 6).setValues(rows);
+        var subtotalRow = rows.length + 2;
+        catSheet.getRange(subtotalRow, 1, 1, 6).setValues([["", "Subtotal (" + cat.name + ")", "", subtotal, "", ""]])
+          .setFontWeight("bold")
+          .setBackground("#f0fdf4");
+      }
+      catSheet.autoResizeColumns(1, 6);
+    }
+    
+    return ContentService.createTextOutput(JSON.stringify({ 
+      status: "success", 
+      message: "Sheet updated successfully",
+      categoriesCount: categories.length,
+      updatedAt: new Date().toISOString() 
+    })).setMimeType(ContentService.MimeType.JSON);
+  } catch(err) {
+    return ContentService.createTextOutput(JSON.stringify({ 
+      status: "error", 
+      message: err.toString() 
+    })).setMimeType(ContentService.MimeType.JSON);
   }
-  
-  var rawData = e.postData.contents;
-  sheet.getRange("A1").setValue(rawData);
-  
-  return ContentService.createTextOutput(JSON.stringify({ status: "success", updated: new Date() }))
-    .setMimeType(ContentService.MimeType.JSON);
 }
 `;
