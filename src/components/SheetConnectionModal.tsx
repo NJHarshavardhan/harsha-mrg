@@ -184,6 +184,24 @@ export function SheetConnectionModal({
               </div>
 
               {/* URL Input Form */}
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-700">Target Google Sheet:</span>
+                  <a
+                    href="https://docs.google.com/spreadsheets/d/1EAoW4OfIB4Jvjm-XyFFRxhpkTupbQ6c-2sIgpg2tc7E/edit"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-xs text-emerald-700 hover:text-emerald-800 font-semibold hover:underline"
+                  >
+                    <span>Open Sheet (1EAoW4Of...)</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+                <p className="text-[11px] text-slate-500 font-mono truncate">
+                  ID: 1EAoW4OfIB4Jvjm-XyFFRxhpkTupbQ6c-2sIgpg2tc7E
+                </p>
+              </div>
+
               <form onSubmit={handleSaveConnection} className="space-y-3">
                 <label className="block text-xs font-bold text-slate-800">
                   Google Apps Script Web App URL or Sheet URL:

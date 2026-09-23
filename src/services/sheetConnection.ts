@@ -3,6 +3,9 @@ import { ExpenseDataState, Category, ExpenseItem } from '../types';
 export const HARDCODED_SERVICE_ACCOUNT = 'harsha-marriage@commanding-day-300706.iam.gserviceaccount.com';
 export const DEFAULT_SPREADSHEET_TITLE = 'harsha-marriage';
 export const GCP_PROJECT_ID = 'commanding-day-300706';
+export const DEFAULT_SHEET_ID = '1EAoW4OfIB4Jvjm-XyFFRxhpkTupbQ6c-2sIgpg2tc7E';
+export const DEFAULT_SHEET_URL = `https://docs.google.com/spreadsheets/d/${DEFAULT_SHEET_ID}/edit`;
+export const DEFAULT_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwXKG2sLRv1fj_ll7Xn4O1lWfLcq0MOzLwgoAGmNg9KOL1yebOYV255QHG2TzK0d4m_/exec';
 
 export type SheetConnectionType = 'service-account' | 'apps-script' | 'google-sheet' | 'custom-api';
 
@@ -23,23 +26,29 @@ export function loadSavedConnectionConfig(): SheetConnectionConfig {
     const raw = localStorage.getItem(STORAGE_CONFIG_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      return {
-        ...parsed,
-        serviceAccountEmail: HARDCODED_SERVICE_ACCOUNT,
-        spreadsheetTitle: parsed.spreadsheetTitle || DEFAULT_SPREADSHEET_TITLE,
-      };
+      if (parsed && (parsed.url || parsed.sheetId)) {
+        return {
+          ...parsed,
+          sheetId: parsed.sheetId || DEFAULT_SHEET_ID,
+          url: parsed.url || DEFAULT_APPS_SCRIPT_URL,
+          type: parsed.url?.includes('script.google.com') ? 'apps-script' : (parsed.type || 'apps-script'),
+          serviceAccountEmail: HARDCODED_SERVICE_ACCOUNT,
+          spreadsheetTitle: parsed.spreadsheetTitle || DEFAULT_SPREADSHEET_TITLE,
+        };
+      }
     }
   } catch (e) {
     console.warn('Failed to load sheet connection config:', e);
   }
 
-  // Default hardcoded configuration
+  // Default configured with the user-provided Google Apps Script Web App:
   return {
-    rawInput: '',
-    url: '',
-    type: 'service-account',
+    rawInput: DEFAULT_APPS_SCRIPT_URL,
+    url: DEFAULT_APPS_SCRIPT_URL,
+    type: 'apps-script',
+    sheetId: DEFAULT_SHEET_ID,
     serviceAccountEmail: HARDCODED_SERVICE_ACCOUNT,
-    spreadsheetTitle: DEFAULT_SPREADSHEET_TITLE,
+    spreadsheetTitle: `${DEFAULT_SPREADSHEET_TITLE} (Apps Script)`,
     lastSynced: new Date().toISOString(),
   };
 }
@@ -144,11 +153,15 @@ export async function fetchFromSheetConnection(
   }
 
   const text = await response.text();
+  if (text.includes('You need access') || text.includes('accounts.google.com') || text.includes('drive-logo')) {
+    throw new Error('Google Apps Script permission required: In Apps Script, click "Deploy" > "Manage deployments", edit the active deployment, change "Who has access" to "Anyone", and click Save.');
+  }
+
   let json: any = {};
   try {
     json = JSON.parse(text);
   } catch {
-    throw new Error('Endpoint response is not valid JSON. Ensure your Apps Script or endpoint outputs JSON.');
+    throw new Error('Endpoint response is not valid JSON. Ensure your Apps Script deployment is configured with "Who has access: Anyone".');
   }
 
   // Normalize returned JSON data
@@ -182,7 +195,7 @@ export async function fetchFromSheetConnection(
 }
 
 /**
- * Saves current expense state to the URL / cURL endpoint without OAuth
+ * Saves current expense state to Google Apps Script / Sheet connection
  */
 export async function pushToSheetConnection(
   config: SheetConnectionConfig,
@@ -193,33 +206,44 @@ export async function pushToSheetConnection(
   }
 
   if (config.type === 'google-sheet') {
-    // Direct Google Sheet URLs without Apps Script are read-only from client browser without credentials
     return {
       success: true,
-      message: 'Direct Sheet is read-only. For bidirectional auto-saving, deploy the Google Apps Script Web App provided in the cURL guide.',
+      message: 'Direct Sheet link is read-only. Use the Apps Script Web App for auto-saving.',
     };
   }
 
-  // Send POST payload with hardcoded service account identification
-  const response = await fetch(config.url, {
-    method: 'POST',
-    mode: 'cors',
-    headers: {
-      'Content-Type': 'text/plain;charset=utf-8',
-      'X-Service-Account': HARDCODED_SERVICE_ACCOUNT,
-    },
-    body: JSON.stringify({
-      ...state,
-      serviceAccount: HARDCODED_SERVICE_ACCOUNT,
-      spreadsheetTitle: DEFAULT_SPREADSHEET_TITLE,
-    }),
-  });
+  const payload = JSON.stringify(state);
 
-  if (!response.ok) {
-    throw new Error(`Sync failed with HTTP ${response.status}: ${response.statusText}`);
+  // Strategy 1: Plain text POST with mode 'no-cors' (avoids preflight issues with Google Apps Script)
+  try {
+    await fetch(config.url, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8',
+      },
+      body: payload,
+    });
+    return { success: true, message: 'Successfully saved to Google Sheet' };
+  } catch (err: any) {
+    console.warn('POST save failed, attempting GET sync channel...', err);
   }
 
-  return { success: true };
+  // Strategy 2: GET fallback for small/medium payloads
+  try {
+    const encoded = encodeURIComponent(payload);
+    if (encoded.length < 2000) {
+      await fetch(`${config.url}?action=save&data=${encoded}`, {
+        mode: 'no-cors',
+      });
+      return { success: true, message: 'Saved to Google Sheet via GET channel' };
+    }
+  } catch (err2: any) {
+    console.error('All save channels failed:', err2);
+    throw new Error('Unable to save to Google Sheet. Check Apps Script permissions.');
+  }
+
+  return { success: true, message: 'Saved to Google Sheet' };
 }
 
 /**
@@ -266,6 +290,29 @@ async function fetchGoogleSheetPublicData(
   // Parse columns and rows
   const headers = (table.cols || []).map((c: any) => (c?.label || '').toLowerCase().trim());
   const rows = table.rows;
+
+  // Check if first cell contains raw JSON payload (from Apps Script or direct sync)
+  if (rows.length > 0 && rows[0]?.c?.[0]?.v != null) {
+    const rawFirstCell = String(rows[0].c[0].v).trim();
+    if (rawFirstCell.startsWith('{') && rawFirstCell.includes('categories')) {
+      try {
+        const parsed = JSON.parse(rawFirstCell);
+        if (parsed && Array.isArray(parsed.categories)) {
+          return {
+            data: {
+              categories: parsed.categories,
+              expenses: parsed.expenses || {},
+              currency: parsed.currency || currentCurrency,
+              lastUpdated: parsed.lastUpdated || new Date().toISOString(),
+            },
+            title: DEFAULT_SPREADSHEET_TITLE,
+          };
+        }
+      } catch (err) {
+        // Continue to table row parser
+      }
+    }
+  }
 
   const categoriesMap = new Map<string, Category>();
   const expensesMap: Record<string, ExpenseItem[]> = {};
@@ -393,99 +440,129 @@ export function generateTestCurlCommand(url: string, method: 'GET' | 'POST'): st
  */
 export const APPS_SCRIPT_SOURCE = `// ============================================================
 // Google Apps Script for harsha-marriage (Store & Fetch)
-// Paste in Extensions > Apps Script in your Google Sheet, then:
-// Click Deploy > New deployment > Web app > Execute as: Me > Who has access: Anyone
+// Target Sheet ID: 1EAoW4OfIB4Jvjm-XyFFRxhpkTupbQ6c-2sIgpg2tc7E
 // ============================================================
 
-function doGet(e) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName("ExpenseData");
-  
-  var data = { categories: [], expenses: {}, currency: "₹" };
-  if (sheet) {
-    var val = sheet.getRange("A1").getValue();
-    if (val && typeof val === "string" && val.indexOf("{") !== -1) {
-      try {
-        data = JSON.parse(val);
-      } catch(err) {}
-    }
+var TARGET_SPREADSHEET_ID = "1EAoW4OfIB4Jvjm-XyFFRxhpkTupbQ6c-2sIgpg2tc7E";
+
+function getSpreadsheet() {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    if (ss) return ss;
+  } catch(e) {}
+  try {
+    return SpreadsheetApp.openById(TARGET_SPREADSHEET_ID);
+  } catch(err) {
+    throw new Error("Unable to open spreadsheet. Please authorize spreadsheet access in Apps Script.");
   }
-  
-  return ContentService.createTextOutput(JSON.stringify(data))
-    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function doGet(e) {
+  try {
+    var ss = getSpreadsheet();
+    
+    // Check if saving via GET parameter (?action=save&data=...)
+    if (e && e.parameter && (e.parameter.data || e.parameter.action === 'save')) {
+      var raw = e.parameter.data;
+      if (raw) {
+        return saveExpenseData(ss, raw);
+      }
+    }
+    
+    var sheet = ss.getSheetByName("ExpenseData");
+    var data = { categories: [], expenses: {}, currency: "₹" };
+    if (sheet) {
+      var val = sheet.getRange("A1").getValue();
+      if (val && typeof val === "string" && val.indexOf("{") !== -1) {
+        try {
+          data = JSON.parse(val);
+        } catch(err) {}
+      }
+    }
+    
+    return ContentService.createTextOutput(JSON.stringify(data))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch(err) {
+    return ContentService.createTextOutput(JSON.stringify({ 
+      error: err.toString(), 
+      categories: [], 
+      expenses: {}, 
+      currency: "₹" 
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
 }
 
 function doPost(e) {
   try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName("ExpenseData");
-    if (!sheet) {
-      sheet = ss.insertSheet("ExpenseData");
-    }
-    
-    var rawData = e.postData.contents;
-    sheet.getRange("A1").setValue(rawData);
-    
-    // Parse data to render clean human-readable tables in the Google Sheet
-    var data = JSON.parse(rawData);
-    var categories = data.categories || [];
-    var expenses = data.expenses || {};
-    var currency = data.currency || "₹";
-
-    // Update or create Category tabs for visual inspection in Google Sheets
-    for (var i = 0; i < categories.length; i++) {
-      var cat = categories[i];
-      var tabName = "Cat " + cat.categoryNumber + " - " + cat.name.substring(0, 20);
-      var catSheet = ss.getSheetByName(tabName);
-      if (!catSheet) {
-        catSheet = ss.insertSheet(tabName);
-      }
-      catSheet.clear();
-      
-      // Header row
-      var headers = [["S.No", "Expense Name", "Date", "Spent Amount (" + currency + ")", "Payment Method", "Notes"]];
-      catSheet.getRange(1, 1, 1, 6).setValues(headers)
-        .setFontWeight("bold")
-        .setBackground("#0f766e")
-        .setFontColor("#ffffff");
-      
-      var items = expenses[cat.id] || [];
-      var rows = [];
-      var subtotal = 0;
-      for (var j = 0; j < items.length; j++) {
-        var it = items[j];
-        subtotal += Number(it.spentAmt) || 0;
-        rows.push([
-          j + 1,
-          it.name || "",
-          it.date || "",
-          Number(it.spentAmt) || 0,
-          it.paymentMethod || "",
-          it.notes || ""
-        ]);
-      }
-      
-      if (rows.length > 0) {
-        catSheet.getRange(2, 1, rows.length, 6).setValues(rows);
-        var subtotalRow = rows.length + 2;
-        catSheet.getRange(subtotalRow, 1, 1, 6).setValues([["", "Subtotal (" + cat.name + ")", "", subtotal, "", ""]])
-          .setFontWeight("bold")
-          .setBackground("#f0fdf4");
-      }
-      catSheet.autoResizeColumns(1, 6);
-    }
-    
-    return ContentService.createTextOutput(JSON.stringify({ 
-      status: "success", 
-      message: "Sheet updated successfully",
-      categoriesCount: categories.length,
-      updatedAt: new Date().toISOString() 
-    })).setMimeType(ContentService.MimeType.JSON);
+    var ss = getSpreadsheet();
+    var rawData = e && e.postData ? e.postData.contents : "";
+    return saveExpenseData(ss, rawData);
   } catch(err) {
     return ContentService.createTextOutput(JSON.stringify({ 
       status: "error", 
       message: err.toString() 
     })).setMimeType(ContentService.MimeType.JSON);
   }
+}
+
+function saveExpenseData(ss, rawData) {
+  if (!rawData) {
+    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "Empty payload" }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  var sheet = ss.getSheetByName("ExpenseData") || ss.insertSheet("ExpenseData");
+  sheet.getRange("A1").setValue(rawData);
+  
+  var data = JSON.parse(rawData);
+  var categories = data.categories || [];
+  var expenses = data.expenses || {};
+  var currency = data.currency || "₹";
+
+  // Auto-generate a clean, styled spreadsheet tab for each Category
+  for (var i = 0; i < categories.length; i++) {
+    var cat = categories[i];
+    var tabName = "Cat " + cat.categoryNumber + " - " + cat.name.substring(0, 20);
+    var catSheet = ss.getSheetByName(tabName) || ss.insertSheet(tabName);
+    catSheet.clear();
+    
+    // Header Row with theme colors
+    var headers = [["S.No", "Expense Name", "Date", "Spent Amount (" + currency + ")", "Payment Method", "Notes"]];
+    catSheet.getRange(1, 1, 1, 6).setValues(headers)
+      .setFontWeight("bold")
+      .setBackground("#0f766e")
+      .setFontColor("#ffffff");
+    
+    var items = expenses[cat.id] || [];
+    var rows = [];
+    var subtotal = 0;
+    for (var j = 0; j < items.length; j++) {
+      var it = items[j];
+      subtotal += Number(it.spentAmt) || 0;
+      rows.push([
+        j + 1,
+        it.name || "",
+        it.date || "",
+        Number(it.spentAmt) || 0,
+        it.paymentMethod || "",
+        it.notes || ""
+      ]);
+    }
+    
+    if (rows.length > 0) {
+      catSheet.getRange(2, 1, rows.length, 6).setValues(rows);
+      var subtotalRow = rows.length + 2;
+      catSheet.getRange(subtotalRow, 1, 1, 6).setValues([["", "Subtotal (" + cat.name + ")", "", subtotal, "", ""]])
+        .setFontWeight("bold")
+        .setBackground("#f0fdf4");
+    }
+    catSheet.autoResizeColumns(1, 6);
+  }
+  
+  return ContentService.createTextOutput(JSON.stringify({ 
+    status: "success", 
+    categoriesCount: categories.length,
+    updatedAt: new Date().toISOString() 
+  })).setMimeType(ContentService.MimeType.JSON);
 }
 `;

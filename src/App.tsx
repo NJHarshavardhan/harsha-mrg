@@ -143,9 +143,14 @@ export default function App() {
       setSyncStatus('syncing');
       setSyncErrorMessage('');
       const result = await fetchFromSheetConnection(cfg, data.currency);
-      if (result.data && result.data.categories) {
+      if (result.data && result.data.categories && result.data.categories.length > 0) {
         setData(result.data);
         saveLocalExpenseState(result.data);
+      } else {
+        // If sheet is empty or newly created, push current state to seed the Google Sheet tabs!
+        if (data.categories.length > 0) {
+          await pushToSheetConnection(cfg, data);
+        }
       }
       setSyncStatus('saved');
     } catch (err: any) {
