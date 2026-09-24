@@ -66,10 +66,8 @@ export function SheetConnectionModal({
   };
 
   const handleClearCache = () => {
-    if (window.confirm('Clear local browser storage? The app will only fetch and store data directly in your connected Google Sheet.')) {
-      onClearLocalStorage();
-      setStatusFeedback('Local browser storage cleared! Working strictly in Sheet-Only mode.');
-    }
+    onClearLocalStorage();
+    setStatusFeedback('Local browser storage cleared! Working strictly in Sheet-Only mode with tab "Fun".');
   };
 
   const isConnected = !!config?.url;
@@ -293,11 +291,11 @@ export function SheetConnectionModal({
 
               <div className="space-y-3">
                 <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wide">
-                  Step-by-Step (Takes 60 seconds):
+                  Step-by-Step (Single Sheet Tab: "Fun"):
                 </h3>
                 <ol className="list-decimal list-inside space-y-2 text-xs text-slate-600">
                   <li>
-                    Open your Google Sheet (e.g., <strong>harsha-marriage</strong>).
+                    Open your Google Sheet (e.g., <strong>harsha-marriage</strong>). Ensure the tab name is <strong>Fun</strong> (or let the script auto-create it).
                   </li>
                   <li>
                     Click <strong>Extensions</strong> → <strong>Apps Script</strong> in the top menu.

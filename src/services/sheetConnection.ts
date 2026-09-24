@@ -1,11 +1,24 @@
 import { ExpenseDataState, Category, ExpenseItem } from '../types';
+import { loadLocalExpenseState } from '../utils/storage';
 
 export const HARDCODED_SERVICE_ACCOUNT = 'harsha-marriage@commanding-day-300706.iam.gserviceaccount.com';
 export const DEFAULT_SPREADSHEET_TITLE = 'harsha-marriage';
+export const DEFAULT_SHEET_TAB = 'Fun';
 export const GCP_PROJECT_ID = 'commanding-day-300706';
 export const DEFAULT_SHEET_ID = '1EAoW4OfIB4Jvjm-XyFFRxhpkTupbQ6c-2sIgpg2tc7E';
 export const DEFAULT_SHEET_URL = `https://docs.google.com/spreadsheets/d/${DEFAULT_SHEET_ID}/edit`;
 export const DEFAULT_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwXKG2sLRv1fj_ll7Xn4O1lWfLcq0MOzLwgoAGmNg9KOL1yebOYV255QHG2TzK0d4m_/exec';
+
+const CATEGORY_COLORS = [
+  '#0d9488', // Teal
+  '#e11d48', // Rose
+  '#8b5cf6', // Violet
+  '#ea580c', // Orange
+  '#2563eb', // Blue
+  '#16a34a', // Emerald
+  '#db2777', // Pink
+  '#475569', // Slate
+];
 
 export type SheetConnectionType = 'service-account' | 'apps-script' | 'google-sheet' | 'custom-api';
 
@@ -131,58 +144,68 @@ export async function fetchFromSheetConnection(
   config: SheetConnectionConfig,
   currentCurrency: string = '₹'
 ): Promise<{ data: ExpenseDataState; title?: string }> {
-  if (!config.url) {
-    throw new Error('No sheet URL provided.');
+  const targetSheetId = config.sheetId || DEFAULT_SHEET_ID;
+
+  // 1. If Apps Script Web App URL is configured, try direct fetch
+  if (config.url && config.url.includes('script.google.com')) {
+    try {
+      const response = await fetch(config.url, {
+        method: 'GET',
+      });
+
+      if (response.ok) {
+        const text = await response.text();
+        if (text && !text.includes('You need access') && !text.includes('accounts.google.com') && !text.includes('drive-logo')) {
+          try {
+            const json = JSON.parse(text);
+            if (json && Array.isArray(json.categories)) {
+              return {
+                data: {
+                  categories: json.categories,
+                  expenses: json.expenses || {},
+                  currency: json.currency || currentCurrency,
+                  lastUpdated: json.lastUpdated || new Date().toISOString(),
+                },
+                title: json.title || config.spreadsheetTitle || DEFAULT_SPREADSHEET_TITLE,
+              };
+            }
+          } catch {
+            // Fall through to GViz / JSONP
+          }
+        }
+      }
+    } catch (appsScriptErr) {
+      console.warn('Apps Script direct fetch encountered network limitation, using Google Sheet channel...', appsScriptErr);
+    }
   }
 
-  // A. Handling direct Google Sheet URL via Google Visualization Query
-  if (config.type === 'google-sheet' && config.sheetId) {
-    return await fetchGoogleSheetPublicData(config.sheetId, currentCurrency);
-  }
-
-  // B. Handling Google Apps Script Web App or custom cURL Webhook
-  const response = await fetch(config.url, {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json, text/plain, */*',
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Endpoint returned HTTP ${response.status} ${response.statusText}`);
-  }
-
-  const text = await response.text();
-  if (text.includes('You need access') || text.includes('accounts.google.com') || text.includes('drive-logo')) {
-    throw new Error('Google Apps Script permission required: In Apps Script, click "Deploy" > "Manage deployments", edit the active deployment, change "Who has access" to "Anyone", and click Save.');
-  }
-
-  let json: any = {};
+  // 2. Fetch directly from the Google Sheet via GViz and JSONP fallback
   try {
-    json = JSON.parse(text);
-  } catch {
-    throw new Error('Endpoint response is not valid JSON. Ensure your Apps Script deployment is configured with "Who has access: Anyone".');
+    const sheetResult = await fetchGoogleSheetPublicData(targetSheetId, currentCurrency);
+    if (sheetResult && sheetResult.data) {
+      return sheetResult;
+    }
+  } catch (sheetErr) {
+    console.warn('Sheet GViz fetch notice, trying JSONP:', sheetErr);
+    try {
+      const jsonpResult = await fetchGoogleSheetViaJSONPData(targetSheetId, currentCurrency);
+      if (jsonpResult && jsonpResult.data) {
+        return jsonpResult;
+      }
+    } catch (jsonpErr) {
+      console.warn('JSONP fetch notice:', jsonpErr);
+    }
   }
 
-  // Normalize returned JSON data
-  if (json && Array.isArray(json.categories)) {
+  // 3. Fall back to cached local storage only if network failed
+  const localCached = loadLocalExpenseState();
+  if (localCached && localCached.categories && localCached.categories.length > 0) {
     return {
-      data: {
-        categories: json.categories,
-        expenses: json.expenses || {},
-        currency: json.currency || currentCurrency,
-        lastUpdated: json.lastUpdated || new Date().toISOString(),
-      },
-      title: json.title || config.spreadsheetTitle || 'harsha-marriage',
+      data: localCached,
+      title: config.spreadsheetTitle || DEFAULT_SPREADSHEET_TITLE,
     };
   }
 
-  // If endpoint returns flat items array, auto-categorize
-  if (Array.isArray(json)) {
-    return parseFlatExpenseItems(json, currentCurrency);
-  }
-
-  // If empty object
   return {
     data: {
       categories: [],
@@ -190,7 +213,7 @@ export async function fetchFromSheetConnection(
       currency: currentCurrency,
       lastUpdated: new Date().toISOString(),
     },
-    title: config.spreadsheetTitle || 'harsha-marriage',
+    title: config.spreadsheetTitle || DEFAULT_SPREADSHEET_TITLE,
   };
 }
 
@@ -247,34 +270,16 @@ export async function pushToSheetConnection(
 }
 
 /**
- * Fetches public Google Sheet data via Google Visualization API
+ * Parses Google Visualization table format into ExpenseDataState
+ * Supports:
+ * 1. Single tab "Fun" with common header: S.No | Category | Expense Name | Date | Spent Amount | Payment Method | Notes
+ * 2. Section blocks with Category header rows
+ * 3. Raw JSON state cell
  */
-async function fetchGoogleSheetPublicData(
-  sheetId: string, 
-  currentCurrency: string
-): Promise<{ data: ExpenseDataState; title?: string }> {
-  // Query sheet
-  const gvizUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json`;
-  const res = await fetch(gvizUrl);
-  if (!res.ok) {
-    throw new Error(
-      `Unable to access Google Sheet (${res.status}). Make sure the Google Sheet sharing is set to "Anyone with the link can view".`
-    );
-  }
-
-  const rawText = await res.text();
-  // Strip Google's JSONP wrapper: /*O_o*/\ngoogle.visualization.Query.setResponse(...);
-  const match = rawText.match(/google\.visualization\.Query\.setResponse\(([\s\S]+)\);?/);
-  if (!match || !match[1]) {
-    throw new Error('Unable to parse Google Sheet table data format.');
-  }
-
-  const gvizData = JSON.parse(match[1]);
-  if (gvizData.status === 'error') {
-    throw new Error(`Google Sheet error: ${gvizData.errors?.[0]?.message || 'Access denied'}`);
-  }
-
-  const table = gvizData.table;
+function parseGVizTableData(
+  table: any, 
+  currentCurrency: string = '₹'
+): { data: ExpenseDataState; title?: string } {
   if (!table || !table.rows || table.rows.length === 0) {
     return {
       data: {
@@ -283,15 +288,13 @@ async function fetchGoogleSheetPublicData(
         currency: currentCurrency,
         lastUpdated: new Date().toISOString(),
       },
-      title: 'harsha-marriage',
+      title: DEFAULT_SPREADSHEET_TITLE,
     };
   }
 
-  // Parse columns and rows
-  const headers = (table.cols || []).map((c: any) => (c?.label || '').toLowerCase().trim());
   const rows = table.rows;
 
-  // Check if first cell contains raw JSON payload (from Apps Script or direct sync)
+  // Check if first cell contains raw JSON payload
   if (rows.length > 0 && rows[0]?.c?.[0]?.v != null) {
     const rawFirstCell = String(rows[0].c[0].v).trim();
     if (rawFirstCell.startsWith('{') && rawFirstCell.includes('categories')) {
@@ -309,14 +312,13 @@ async function fetchGoogleSheetPublicData(
           };
         }
       } catch (err) {
-        // Continue to table row parser
+        // Fall through to row parser
       }
     }
   }
 
   const categoriesMap = new Map<string, Category>();
   const expensesMap: Record<string, ExpenseItem[]> = {};
-
   let currentCategory: Category | null = null;
   let catIndex = 1;
 
@@ -325,44 +327,120 @@ async function fetchGoogleSheetPublicData(
     const val0 = c[0]?.v != null ? String(c[0].v).trim() : '';
     const val1 = c[1]?.v != null ? String(c[1].v).trim() : '';
     const val2 = c[2]?.v != null ? String(c[2].v).trim() : '';
-    const val3 = c[3]?.v != null ? Number(c[3].v) : 0;
-    const val4 = c[4]?.v != null ? String(c[4].v).trim() : '';
+    const val3 = c[3]?.v != null ? String(c[3].v).trim() : '';
+    const val4 = c[4]?.v != null ? c[4].v : null;
     const val5 = c[5]?.v != null ? String(c[5].v).trim() : '';
+    const val6 = c[6]?.v != null ? String(c[6].v).trim() : '';
 
-    // Check if row marks a Category header
-    if (val0.toLowerCase().startsWith('category') || (val0 && !val2 && isNaN(Number(val0)))) {
+    // 1. Skip header row
+    const lower0 = val0.toLowerCase();
+    const lower1 = val1.toLowerCase();
+    const lower2 = val2.toLowerCase();
+    if (
+      lower0.includes('s.no') || 
+      lower1.includes('category') || 
+      lower2.includes('expense name') || 
+      lower2.includes('payee')
+    ) {
+      return;
+    }
+
+    // 2. Skip summary or subtotal rows
+    if (
+      lower0.includes('total') || 
+      lower1.includes('total') || 
+      lower2.includes('total') || 
+      lower1.includes('subtotal')
+    ) {
+      return;
+    }
+
+    // 3. Format A: Single Tab "Fun" with Category in Column B (Column index 1)
+    // Structure: [S.No, Category, Expense Name, Date, Spent Amount, Payment Method, Notes]
+    if (val1 && isNaN(Number(val1)) && !lower1.startsWith('category:')) {
+      const catName = val1;
+      const catKey = catName.toLowerCase();
+
+      if (!categoriesMap.has(catKey)) {
+        const catId = `cat_${catIndex}_${catKey.replace(/[^a-z0-9]/g, '_')}`;
+        const newCat: Category = {
+          id: catId,
+          categoryNumber: catIndex,
+          name: catName,
+          color: CATEGORY_COLORS[(catIndex - 1) % CATEGORY_COLORS.length],
+          budget: 0,
+          description: '',
+        };
+        catIndex++;
+        categoriesMap.set(catKey, newCat);
+        expensesMap[catId] = [];
+      }
+
+      const activeCat = categoriesMap.get(catKey)!;
+
+      // Check if this is an expense item or placeholder row
+      const itemName = val2;
+      const isPlaceholder = itemName.includes('(Category created');
+
+      if (itemName && !isPlaceholder) {
+        const rawAmt = val4 != null ? val4 : (val3 != null && !isNaN(Number(val3)) ? val3 : 0);
+        const spentAmount = typeof rawAmt === 'number' ? rawAmt : (parseFloat(String(rawAmt).replace(/[^0-9.-]+/g, '')) || 0);
+
+        if (spentAmount >= 0) {
+          const itemDate = val3 && val3.match(/^\d{4}-\d{2}-\d{2}/) 
+            ? val3 
+            : new Date().toISOString().split('T')[0];
+
+          expensesMap[activeCat.id].push({
+            id: `exp_${rowIdx}_${activeCat.id}`,
+            sno: expensesMap[activeCat.id].length + 1,
+            name: itemName,
+            date: itemDate,
+            spentAmt: spentAmount,
+            paymentMethod: val5 || 'UPI',
+            notes: val6 || '',
+          });
+        }
+      }
+      return;
+    }
+
+    // 4. Format B: Row marks a Category Section Header
+    if (lower0.startsWith('category') || (val0 && !val2 && isNaN(Number(val0)))) {
       const catName = val1 || val0.replace(/^category\s*\d*:\s*/i, '') || `Category ${catIndex}`;
-      const catId = `cat_${catIndex}_${catName.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
-      currentCategory = {
-        id: catId,
-        categoryNumber: catIndex++,
-        name: catName,
-        color: ['#0d9488', '#e11d48', '#8b5cf6', '#ea580c', '#2563eb', '#16a34a'][catIndex % 6],
-      };
-      categoriesMap.set(catId, currentCategory);
-      if (!expensesMap[catId]) expensesMap[catId] = [];
+      const catKey = catName.toLowerCase();
+
+      if (!categoriesMap.has(catKey)) {
+        const catId = `cat_${catIndex}_${catKey.replace(/[^a-z0-9]/g, '_')}`;
+        currentCategory = {
+          id: catId,
+          categoryNumber: catIndex,
+          name: catName,
+          color: CATEGORY_COLORS[(catIndex - 1) % CATEGORY_COLORS.length],
+        };
+        catIndex++;
+        categoriesMap.set(catKey, currentCategory);
+        expensesMap[catId] = [];
+      } else {
+        currentCategory = categoriesMap.get(catKey)!;
+      }
       return;
     }
 
-    // Skip summary or subtotal rows
-    if (val0.toLowerCase().includes('total') || val1.toLowerCase().includes('total') || val1.toLowerCase().includes('subtotal')) {
-      return;
-    }
-
-    // Check if this row is an expense item
-    const spentAmount = !isNaN(Number(val3)) ? Number(val3) : (!isNaN(Number(val2)) ? Number(val2) : 0);
+    // 5. Format C: Expense item under current Category
+    const rawAmt = val3 != null && !isNaN(Number(val3)) ? Number(val3) : (val2 != null && !isNaN(Number(val2)) ? Number(val2) : 0);
     const itemName = val1 || val0;
     const itemDate = val2 && val2.match(/^\d{4}-\d{2}-\d{2}/) ? val2 : new Date().toISOString().split('T')[0];
 
-    if (itemName && spentAmount > 0) {
+    if (itemName && rawAmt > 0) {
       if (!currentCategory) {
         currentCategory = {
           id: 'cat_general',
           categoryNumber: 1,
           name: 'General Expenses',
-          color: '#0d9488',
+          color: CATEGORY_COLORS[0],
         };
-        categoriesMap.set('cat_general', currentCategory);
+        categoriesMap.set('general', currentCategory);
         expensesMap['cat_general'] = [];
       }
 
@@ -371,8 +449,8 @@ async function fetchGoogleSheetPublicData(
         sno: (expensesMap[currentCategory.id] || []).length + 1,
         name: itemName,
         date: itemDate,
-        spentAmt: spentAmount,
-        paymentMethod: val4 || 'UPI / Cash',
+        spentAmt: rawAmt,
+        paymentMethod: val4 ? String(val4) : 'UPI',
         notes: val5 || '',
       };
 
@@ -387,8 +465,113 @@ async function fetchGoogleSheetPublicData(
       currency: currentCurrency,
       lastUpdated: new Date().toISOString(),
     },
-    title: 'harsha-marriage',
+    title: DEFAULT_SPREADSHEET_TITLE,
   };
+}
+
+/**
+ * Fetches public Google Sheet data via Google Visualization API
+ * Prioritizes the "Fun" single tab!
+ */
+async function fetchGoogleSheetPublicData(
+  sheetId: string, 
+  currentCurrency: string
+): Promise<{ data: ExpenseDataState; title?: string }> {
+  // Query Fun tab first, then generic root
+  const tryUrls = [
+    `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json&sheet=${DEFAULT_SHEET_TAB}`,
+    `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json&sheet=ExpenseData`,
+    `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json`
+  ];
+
+  for (const url of tryUrls) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) {
+        const rawText = await res.text();
+        const match = rawText.match(/google\.visualization\.Query\.setResponse\(([\s\S]+)\);?/);
+        if (match && match[1]) {
+          const gvizData = JSON.parse(match[1]);
+          if (gvizData.table && gvizData.table.rows && gvizData.table.rows.length > 0) {
+            return parseGVizTableData(gvizData.table, currentCurrency);
+          }
+        }
+      }
+    } catch {
+      // Continue to next URL or JSONP
+    }
+  }
+
+  // Fallback to JSONP script injection
+  return await fetchGoogleSheetViaJSONPData(sheetId, currentCurrency);
+}
+
+/**
+ * Robust JSONP Loader that bypasses CORS restrictions entirely
+ */
+function fetchGoogleSheetViaJSONPData(
+  sheetId: string,
+  currentCurrency: string
+): Promise<{ data: ExpenseDataState; title?: string }> {
+  return new Promise((resolve, reject) => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      return reject(new Error('Browser window environment required for JSONP'));
+    }
+
+    const callbackName = `gviz_cb_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('Google Sheet JSONP connection timed out'));
+    }, 8000);
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      try {
+        delete (window as any)[callbackName];
+      } catch (e) {}
+      const script = document.getElementById(callbackName);
+      if (script && script.parentNode) {
+        script.parentNode.removeChild(script);
+      }
+    };
+
+    (window as any)[callbackName] = (resp: any) => {
+      cleanup();
+      if (resp && resp.table) {
+        try {
+          const parsed = parseGVizTableData(resp.table, currentCurrency);
+          return resolve(parsed);
+        } catch (err) {
+          return reject(err);
+        }
+      }
+      reject(new Error('Invalid Google Sheet JSONP response'));
+    };
+
+    const script = document.createElement('script');
+    script.id = callbackName;
+    script.src = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=responseHandler:${callbackName}&sheet=${DEFAULT_SHEET_TAB}`;
+    script.onerror = () => {
+      cleanup();
+      // Try root sheet
+      const fallbackScript = document.createElement('script');
+      const fallbackCb = `${callbackName}_fb`;
+      (window as any)[fallbackCb] = (resp: any) => {
+        try {
+          delete (window as any)[fallbackCb];
+          if (fallbackScript.parentNode) fallbackScript.parentNode.removeChild(fallbackScript);
+          if (resp && resp.table) {
+            return resolve(parseGVizTableData(resp.table, currentCurrency));
+          }
+        } catch (e) {}
+        reject(new Error('Sheet loading failed'));
+      };
+      fallbackScript.src = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=responseHandler:${fallbackCb}`;
+      document.body.appendChild(fallbackScript);
+    };
+
+    document.body.appendChild(script);
+  });
 }
 
 function parseFlatExpenseItems(
@@ -437,13 +620,18 @@ export function generateTestCurlCommand(url: string, method: 'GET' | 'POST'): st
 
 /**
  * 1-click Google Apps Script code to paste in Extensions > Apps Script of "harsha-marriage" sheet
+ * Uses ONLY 1 single sheet tab named "Fun" with common header.
+ * The application displays and groups all expenses into separate category tables.
  */
 export const APPS_SCRIPT_SOURCE = `// ============================================================
-// Google Apps Script for harsha-marriage (Store & Fetch)
+// Google Apps Script for harsha-marriage
 // Target Sheet ID: 1EAoW4OfIB4Jvjm-XyFFRxhpkTupbQ6c-2sIgpg2tc7E
+// Single Tab Name: "Fun"
+// Common Header: S.No | Category | Expense Name / Payee | Date | Spent Amount (₹) | Payment Method | Notes
 // ============================================================
 
 var TARGET_SPREADSHEET_ID = "1EAoW4OfIB4Jvjm-XyFFRxhpkTupbQ6c-2sIgpg2tc7E";
+var TAB_NAME = "Fun";
 
 function getSpreadsheet() {
   try {
@@ -469,18 +657,26 @@ function doGet(e) {
       }
     }
     
-    var sheet = ss.getSheetByName("ExpenseData");
-    var data = { categories: [], expenses: {}, currency: "₹" };
-    if (sheet) {
-      var val = sheet.getRange("A1").getValue();
-      if (val && typeof val === "string" && val.indexOf("{") !== -1) {
-        try {
-          data = JSON.parse(val);
-        } catch(err) {}
-      }
+    // 1. Try reading cached state from Script Properties for high fidelity
+    var propData = PropertiesService.getScriptProperties().getProperty("EXPENSE_DATA_STATE");
+    if (propData) {
+      try {
+        var parsed = JSON.parse(propData);
+        if (parsed && Array.isArray(parsed.categories)) {
+          return ContentService.createTextOutput(JSON.stringify(parsed))
+            .setMimeType(ContentService.MimeType.JSON);
+        }
+      } catch(err) {}
     }
-    
-    return ContentService.createTextOutput(JSON.stringify(data))
+
+    // 2. Read directly from the single "Fun" tab
+    var sheet = ss.getSheetByName(TAB_NAME);
+    if (!sheet) {
+      sheet = ss.getSheets()[0];
+    }
+
+    var result = readFromFunSheet(sheet);
+    return ContentService.createTextOutput(JSON.stringify(result))
       .setMimeType(ContentService.MimeType.JSON);
   } catch(err) {
     return ContentService.createTextOutput(JSON.stringify({ 
@@ -505,63 +701,196 @@ function doPost(e) {
   }
 }
 
+function readFromFunSheet(sheet) {
+  if (!sheet) {
+    return { categories: [], expenses: {}, currency: "₹" };
+  }
+
+  var values = sheet.getDataRange().getValues();
+  if (!values || values.length <= 1) {
+    return { categories: [], expenses: {}, currency: "₹" };
+  }
+
+  var categoriesMap = {};
+  var categoriesList = [];
+  var expensesMap = {};
+  var catIndex = 1;
+  var colors = ['#0d9488', '#e11d48', '#8b5cf6', '#ea580c', '#2563eb', '#16a34a', '#db2777', '#475569'];
+
+  // Start from row 1 (skipping row 0 common header)
+  for (var r = 1; r < values.length; r++) {
+    var row = values[r];
+    var sno = row[0];
+    var catName = String(row[1] || "").trim();
+    var itemName = String(row[2] || "").trim();
+    var dateVal = row[3];
+    var spentAmt = Number(row[4]) || 0;
+    var payMethod = String(row[5] || "UPI").trim();
+    var notes = String(row[6] || "").trim();
+
+    if (!catName && !itemName) continue;
+    if (String(sno).toLowerCase().includes("total") || catName.toLowerCase().includes("total")) continue;
+
+    if (!catName) catName = "General";
+
+    var catKey = catName.toLowerCase();
+    if (!categoriesMap[catKey]) {
+      var catId = "cat_" + catIndex + "_" + catKey.replace(/[^a-z0-9]/g, "_");
+      var newCat = {
+        id: catId,
+        categoryNumber: catIndex,
+        name: catName,
+        color: colors[(catIndex - 1) % colors.length],
+        budget: 0,
+        description: ""
+      };
+      categoriesMap[catKey] = newCat;
+      categoriesList.push(newCat);
+      expensesMap[catId] = [];
+      catIndex++;
+    }
+
+    var targetCat = categoriesMap[catKey];
+    if (itemName && itemName.indexOf("(Category created") === -1 && spentAmt >= 0) {
+      var formattedDate = "";
+      if (dateVal instanceof Date) {
+        formattedDate = Utilities.formatDate(dateVal, Session.getScriptTimeZone() || "GMT", "yyyy-MM-dd");
+      } else {
+        formattedDate = String(dateVal || "").substring(0, 10);
+      }
+      if (!formattedDate || formattedDate.indexOf("-") === -1) {
+        formattedDate = Utilities.formatDate(new Date(), "GMT", "yyyy-MM-dd");
+      }
+
+      expensesMap[targetCat.id].push({
+        id: "exp_" + r + "_" + targetCat.id,
+        sno: expensesMap[targetCat.id].length + 1,
+        name: itemName,
+        date: formattedDate,
+        spentAmt: spentAmt,
+        paymentMethod: payMethod || "UPI",
+        notes: notes
+      });
+    }
+  }
+
+  return {
+    categories: categoriesList,
+    expenses: expensesMap,
+    currency: "₹",
+    lastUpdated: new Date().toISOString()
+  };
+}
+
 function saveExpenseData(ss, rawData) {
   if (!rawData) {
     return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "Empty payload" }))
       .setMimeType(ContentService.MimeType.JSON);
   }
 
-  var sheet = ss.getSheetByName("ExpenseData") || ss.insertSheet("ExpenseData");
-  sheet.getRange("A1").setValue(rawData);
-  
+  // Save to script properties for fast retrieval
+  try {
+    PropertiesService.getScriptProperties().setProperty("EXPENSE_DATA_STATE", rawData);
+  } catch(e) {}
+
   var data = JSON.parse(rawData);
   var categories = data.categories || [];
   var expenses = data.expenses || {};
   var currency = data.currency || "₹";
 
-  // Auto-generate a clean, styled spreadsheet tab for each Category
+  // Use ONLY 1 sheet tab named "Fun"
+  var sheet = ss.getSheetByName(TAB_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(TAB_NAME);
+  }
+  sheet.clear();
+
+  // Common Heading (Row 1)
+  var headers = [["S.No", "Category", "Expense Name / Payee", "Date", "Spent Amount (" + currency + ")", "Payment Method", "Notes"]];
+  sheet.getRange(1, 1, 1, 7).setValues(headers)
+    .setFontWeight("bold")
+    .setBackground("#0f766e")
+    .setFontColor("#ffffff")
+    .setHorizontalAlignment("center");
+
+  var rows = [];
+  var globalSNo = 1;
+  var grandTotal = 0;
+
+  // Build rows grouped by category
   for (var i = 0; i < categories.length; i++) {
     var cat = categories[i];
-    var tabName = "Cat " + cat.categoryNumber + " - " + cat.name.substring(0, 20);
-    var catSheet = ss.getSheetByName(tabName) || ss.insertSheet(tabName);
-    catSheet.clear();
-    
-    // Header Row with theme colors
-    var headers = [["S.No", "Expense Name", "Date", "Spent Amount (" + currency + ")", "Payment Method", "Notes"]];
-    catSheet.getRange(1, 1, 1, 6).setValues(headers)
-      .setFontWeight("bold")
-      .setBackground("#0f766e")
-      .setFontColor("#ffffff");
-    
     var items = expenses[cat.id] || [];
-    var rows = [];
-    var subtotal = 0;
-    for (var j = 0; j < items.length; j++) {
-      var it = items[j];
-      subtotal += Number(it.spentAmt) || 0;
+
+    if (items.length === 0) {
+      // Empty category: write placeholder so category is preserved
       rows.push([
-        j + 1,
-        it.name || "",
-        it.date || "",
-        Number(it.spentAmt) || 0,
-        it.paymentMethod || "",
-        it.notes || ""
+        globalSNo++,
+        cat.name,
+        "(Category created - no spends yet)",
+        Utilities.formatDate(new Date(), "GMT", "yyyy-MM-dd"),
+        0,
+        "-",
+        cat.description || ""
       ]);
+    } else {
+      for (var j = 0; j < items.length; j++) {
+        var it = items[j];
+        var amt = Number(it.spentAmt) || 0;
+        grandTotal += amt;
+        rows.push([
+          globalSNo++,
+          cat.name,
+          it.name || "",
+          it.date || Utilities.formatDate(new Date(), "GMT", "yyyy-MM-dd"),
+          amt,
+          it.paymentMethod || "UPI",
+          it.notes || ""
+        ]);
+      }
     }
-    
-    if (rows.length > 0) {
-      catSheet.getRange(2, 1, rows.length, 6).setValues(rows);
-      var subtotalRow = rows.length + 2;
-      catSheet.getRange(subtotalRow, 1, 1, 6).setValues([["", "Subtotal (" + cat.name + ")", "", subtotal, "", ""]])
-        .setFontWeight("bold")
-        .setBackground("#f0fdf4");
-    }
-    catSheet.autoResizeColumns(1, 6);
   }
-  
+
+  if (rows.length > 0) {
+    sheet.getRange(2, 1, rows.length, 7).setValues(rows);
+    
+    // Formatting
+    sheet.getRange(2, 1, rows.length, 1).setHorizontalAlignment("center");
+    sheet.getRange(2, 2, rows.length, 1).setFontWeight("bold");
+    sheet.getRange(2, 4, rows.length, 1).setHorizontalAlignment("center");
+    sheet.getRange(2, 5, rows.length, 1).setNumberFormat("#,##0.00").setHorizontalAlignment("right");
+    sheet.getRange(2, 6, rows.length, 1).setHorizontalAlignment("center");
+
+    // Grand Total summary at bottom
+    var summaryRowIndex = rows.length + 2;
+    sheet.getRange(summaryRowIndex, 1, 1, 7).setValues([["", "Grand Total", categories.length + " Categories", "", grandTotal, "", ""]])
+      .setFontWeight("bold")
+      .setBackground("#f0fdf4")
+      .setFontColor("#166534");
+    sheet.getRange(summaryRowIndex, 5).setNumberFormat("#,##0.00").setHorizontalAlignment("right");
+  }
+
+  sheet.autoResizeColumns(1, 7);
+
+  // Clean up any extra redundant tabs so ONLY 1 tab ("Fun") exists
+  var allSheets = ss.getSheets();
+  for (var k = 0; k < allSheets.length; k++) {
+    var s = allSheets[k];
+    if (s.getName() !== TAB_NAME && allSheets.length > 1) {
+      if (s.getName().indexOf("Cat ") === 0 || s.getName() === "ExpenseData") {
+        try {
+          ss.deleteSheet(s);
+        } catch(e) {}
+      }
+    }
+  }
+
   return ContentService.createTextOutput(JSON.stringify({ 
     status: "success", 
+    tab: TAB_NAME,
     categoriesCount: categories.length,
+    rowsCount: rows.length,
+    grandTotal: grandTotal,
     updatedAt: new Date().toISOString() 
   })).setMimeType(ContentService.MimeType.JSON);
 }

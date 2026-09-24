@@ -1,14 +1,28 @@
 import { ExpenseDataState, Category, ExpenseItem } from '../types';
 
-const LOCAL_STORAGE_KEY = 'wedding_expense_tracker_state_v1';
+const LOCAL_STORAGE_KEY = 'spends_expense_fun_v2';
+const LEGACY_STORAGE_KEYS = ['wedding_expense_tracker_state_v1', 'wedding_expense_tracker_state'];
 
 export function loadLocalExpenseState(): ExpenseDataState {
   try {
+    // Purge legacy storage keys to eliminate any unwanted sample/dummy categories
+    LEGACY_STORAGE_KEYS.forEach(key => {
+      try { localStorage.removeItem(key); } catch (_) {}
+    });
+
     const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed && Array.isArray(parsed.categories)) {
-        return parsed;
+        // Filter out any dummy sample categories containing "Mandapam"
+        const filteredCategories = parsed.categories.filter((c: Category) => 
+          c.name.toLowerCase() !== 'mandapam'
+        );
+        return {
+          ...parsed,
+          categories: filteredCategories,
+          currency: '₹',
+        };
       }
     }
   } catch (e) {
@@ -28,6 +42,9 @@ export function saveLocalExpenseState(state: ExpenseDataState): void {
 export function clearLocalExpenseState(): void {
   try {
     localStorage.removeItem(LOCAL_STORAGE_KEY);
+    LEGACY_STORAGE_KEYS.forEach(key => {
+      try { localStorage.removeItem(key); } catch (_) {}
+    });
   } catch (e) {
     console.warn('Failed to clear local storage:', e);
   }
@@ -122,34 +139,33 @@ export function generateCSV(state: ExpenseDataState): string {
 }
 
 /**
- * Generates TSV text formatted for immediate copy-paste into Google Sheets.
+ * Generates TSV text formatted for immediate copy-paste into Google Sheets (Single tab "Fun" format).
+ * Header: S.No | Category | Expense Name / Payee | Date | Spent Amount | Payment Method | Notes
  */
 export function generateGoogleSheetsTSV(state: ExpenseDataState): string {
   const lines: string[] = [];
 
-  state.categories.forEach((cat) => {
-    lines.push(`Category ${cat.categoryNumber}: ${cat.name}\t\t\t`);
-    lines.push(`S.No\tExpense Name\tDate\tSpent Amount (${state.currency})`);
+  // Common Header for tab "Fun"
+  lines.push(`S.No\tCategory\tExpense Name / Payee\tDate\tSpent Amount (${state.currency})\tPayment Method\tNotes`);
 
-    const items = state.expenses[cat.id] || [];
-    let catTotal = 0;
-
-    items.forEach((item, index) => {
-      catTotal += item.spentAmt;
-      lines.push(`${index + 1}\t${item.name}\t${item.date}\t${item.spentAmt}`);
-    });
-
-    lines.push(`\tSubtotal (${cat.name})\t\t${catTotal}`);
-    lines.push(``);
-  });
-
+  let globalSNo = 1;
   let grandTotal = 0;
-  state.categories.forEach((c) => {
-    (state.expenses[c.id] || []).forEach((i) => {
-      grandTotal += i.spentAmt;
-    });
+
+  state.categories.forEach((cat) => {
+    const items = state.expenses[cat.id] || [];
+
+    if (items.length === 0) {
+      lines.push(`${globalSNo++}\t${cat.name}\t(Category created - no spends yet)\t${new Date().toISOString().split('T')[0]}\t0\t-\t${cat.description || ''}`);
+    } else {
+      items.forEach((item) => {
+        grandTotal += Number(item.spentAmt) || 0;
+        lines.push(
+          `${globalSNo++}\t${cat.name}\t${item.name}\t${item.date}\t${item.spentAmt}\t${item.paymentMethod || 'UPI'}\t${item.notes || ''}`
+        );
+      });
+    }
   });
 
-  lines.push(`GRAND TOTAL\t\t\t${grandTotal}`);
+  lines.push(`\tGrand Total\t${state.categories.length} Categories\t\t${grandTotal}\t\t`);
   return lines.join('\n');
 }
