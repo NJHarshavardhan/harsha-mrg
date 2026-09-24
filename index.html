@@ -16,7 +16,15 @@
   <body class="bg-slate-50 text-slate-800 antialiased font-['Plus_Jakarta_Sans',sans-serif]">
     <div id="root"></div>
     <script>
-      // Fallback for GitHub Pages if deployed directly from repository root without a build step
+      // 1. Ensure trailing slash on GitHub Pages directory URLs so relative paths (./assets/...) resolve properly
+      if (window.location.hostname.includes('github.io')) {
+        var p = window.location.pathname;
+        if (!p.endsWith('/') && !p.split('/').pop().includes('.')) {
+          window.location.replace(p + '/' + window.location.search + window.location.hash);
+        }
+      }
+
+      // 2. Fallback for GitHub Pages if deployed directly from repository root without a build step
       if (window.location.hostname.includes('github.io') && !window.location.pathname.includes('/docs/')) {
         // If the compiled bundle isn't present, redirect to the pre-compiled /docs/ directory
         var hasBuiltAssets = document.querySelector('script[src*="assets/"]');

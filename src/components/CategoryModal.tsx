@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Category } from '../types';
-import { X, Palette, Hash } from 'lucide-react';
+import { X, Palette } from 'lucide-react';
+import { SmartInputField } from './smart-input/SmartInputField';
 
 interface CategoryModalProps {
   isOpen: boolean;
@@ -23,14 +24,14 @@ const COLOR_OPTIONS = [
 ];
 
 const QUICK_SUGGESTIONS = [
-  'Reception',
-  'Sangeet & Mehendi',
-  'Haldi Ceremony',
-  'Jewelry & Clothes',
-  'Catering & Sweets',
-  'Photography & Media',
-  'Travel & Logistics',
-  'Return Gifts & Favors',
+  { en: 'Catering & Food', ta: 'கேட்டரிங் & உணவு' },
+  { en: 'Hall & Venue', ta: 'திருமண மண்டபம்' },
+  { en: 'Decoration & Flowers', ta: 'அலங்காரம் & பூக்கள்' },
+  { en: 'Photography & Media', ta: 'புகைப்படம் & வீடியோ' },
+  { en: 'Jewelry & Gold', ta: 'தங்கம் & நகைகள்' },
+  { en: 'Clothes & Silk', ta: 'பட்டு புடவை & ஆடைகள்' },
+  { en: 'Travel & Logistics', ta: 'பயணம் & வண்டி வாடகை' },
+  { en: 'Return Gifts & Favors', ta: 'தாம்பூலம் & பரிசுகள்' },
 ];
 
 export function CategoryModal({
@@ -118,75 +119,51 @@ export function CategoryModal({
           {!initialCategory && (
             <div>
               <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                Quick Category Suggestions
+                Quick Category Suggestions (English & தமிழ்)
               </label>
               <div className="flex flex-wrap gap-1.5">
                 {QUICK_SUGGESTIONS.map((sug) => (
                   <button
                     type="button"
-                    key={sug}
-                    onClick={() => setName(sug)}
-                    className="px-2.5 py-1 text-xs rounded-full bg-slate-100 hover:bg-indigo-50 hover:text-indigo-600 text-slate-600 border border-slate-200 transition-colors"
+                    key={sug.en}
+                    onClick={() => setName(sug.ta)}
+                    className="px-2.5 py-1 text-xs rounded-xl bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 border border-slate-200 transition-colors flex items-center gap-1 cursor-pointer"
                   >
-                    + {sug}
+                    <span className="font-semibold">{sug.ta}</span>
+                    <span className="text-[10px] text-slate-400">({sug.en})</span>
                   </button>
                 ))}
               </div>
             </div>
           )}
 
-          {/* Category Name */}
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1.5">
-              Category Name <span className="text-rose-500">*</span>
-            </label>
-            <input
-              type="text"
-              required
-              placeholder="e.g. Reception, Sangeet, Catering, Travel"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-sm text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
-              autoFocus
-            />
-            <p className="text-xs text-slate-400 mt-1">
-              This will create a distinct separate table with its own header & total calculator.
-            </p>
-          </div>
+          {/* Category Name with Smart Input Field */}
+          <SmartInputField
+            label="Category Name"
+            value={name}
+            onChange={setName}
+            placeholder="e.g. திருமண மண்டபம், கேட்டரிங், Reception, Travel"
+            required
+          />
 
-          {/* Budget */}
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1.5">
-              Target Budget ({currency}) (Optional)
-            </label>
-            <div className="relative">
-              <span className="absolute left-3 top-2.5 text-slate-400 font-mono text-sm">
-                {currency}
-              </span>
-              <input
-                type="number"
-                step="any"
-                placeholder="e.g. 100000"
-                value={budget}
-                onChange={(e) => setBudget(e.target.value)}
-                className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-sm font-mono text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
-              />
-            </div>
-          </div>
+          {/* Budget with Smart Input Field */}
+          <SmartInputField
+            label={`Target Budget (${currency}) (Optional)`}
+            value={budget}
+            onChange={setBudget}
+            type="number"
+            step="any"
+            prefix={currency}
+            placeholder="e.g. 100000"
+          />
 
-          {/* Description */}
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1.5">
-              Subtitle / Description (Optional)
-            </label>
-            <input
-              type="text"
-              placeholder="e.g. Evening dinner and music arrangements"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-sm text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
-            />
-          </div>
+          {/* Description with Smart Input Field */}
+          <SmartInputField
+            label="Subtitle / Description (Optional)"
+            value={description}
+            onChange={setDescription}
+            placeholder="e.g. திருமண மாலை மற்றும் அலங்காரம், Evening arrangements"
+          />
 
           {/* Color Picker */}
           <div>

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
-    "build": "vite build && node -e \"const fs=require('fs'); fs.rmSync('docs',{recursive:true,force:true}); fs.cpSync('dist','docs',{recursive:true});\"",
+    "build": "vite build && node scripts/post-build.js",
     "preview": "vite preview",
     "predeploy": "npm run build",
     "deploy": "gh-pages -d dist",

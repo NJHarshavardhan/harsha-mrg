@@ -6,6 +6,7 @@ export interface ExpenseItem {
   spentAmt: number;
   notes?: string;
   paymentMethod?: string;
+  handwrittenImage?: string; // Data URL / image of what was written by hand
 }
 
 export interface Category {
